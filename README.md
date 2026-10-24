@@ -32,6 +32,36 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), OpenR
 
 ---
 
+## Running on Intel Atom D525
+
+This fork adds support for the Intel Atom D525 (and similar pre-2009 x86-64 CPUs that lack SSE4.1/SSE4.2). The stock NumPy wheel can crash with `SIGILL` on these CPUs; the workaround is to build a compatible NumPy wheel and make Hermes' package manager prefer it.
+
+**What this does not do:** it does not make local LLM inference fast. Use this fork to run the Hermes agent/gateway on the D525, but route model calls to a remote API.
+
+### Files that must be changed in this repository
+
+These files contain the D525-specific adjustments:
+
+- `pm/packages.py` — adds an `_install_atom_compatible_numpy(environment)` hook after normal dependency installation and before environment validation.
+- `website/docs/reference/package-management.md` — documents the hook and the managed-environment behavior for this platform.
+- `docs/hermes-intel-atom-d525-guide.md` — full step-by-step guide for building the NumPy wheel, patching Hermes, repairing the environment, and wiring systemd.
+
+Systemd drop-ins (`hermes-gateway.service` and `hermes-dashboard.service`) are host-local and are not tracked in this repo.
+
+### Quick-start summary
+
+1. **Check CPU flags.** The D525 has `sse4_1` absent: `grep -m1 '^flags' /proc/cpuinfo`.
+2. **Build NumPy 2.4.3** with `cpu-baseline=none`, `cpu-dispatch=none`, and `cpu-baseline-detect=disabled` using the same Python version Hermes manages. Install it to `/opt/hermes-local-wheels/` and record its SHA-256.
+3. **Test the wheel** in a throwaway venv before touching Hermes: `import numpy; numpy.__version__` should be `2.4.3` and must not crash with `Illegal instruction`.
+4. **Patch `pm/packages.py`** to reinstall `numpy==2.4.3` from `/opt/hermes-local-wheels/` on Linux x86-64 hosts where `/proc/cpuinfo` lacks `sse4_1`. The hook must fail closed if the wheel is missing, has the wrong hash, or has the wrong Python ABI.
+5. **Repair the Hermes environment** via `hermes pm repair` as the `hermes` service account.
+6. **Verify** with the service account: `python -c "import numpy as np; print(np.__version__, int(np.dot(np.arange(100), np.arange(100))))"` should print `2.4.3 328350`.
+7. **Point systemd** at the selected environment via drop-ins for `hermes-gateway.service` and `hermes-dashboard.service`, setting `ExecStart` to the candidate venv Python and updating `VIRTUAL_ENV`/`PATH`.
+
+See the full guide for detailed commands, ownership pitfalls, and acceptance criteria: `docs/hermes-intel-atom-d525-guide.md`.
+
+---
+
 ## Quick Install
 
 ### Linux, macOS, WSL2

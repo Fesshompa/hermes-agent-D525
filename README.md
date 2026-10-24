@@ -48,6 +48,8 @@ These files contain the D525-specific adjustments:
 
 Systemd drop-ins (`hermes-gateway.service` and `hermes-dashboard.service`) are host-local and are not tracked in this repo.
 
+**Important:** do not use the Dashboard/Desktop Update button or unattended `hermes update` on this setup. The updater can stash or drop the `pm/packages.py` patch. After any Hermes update, restore the patch, rebuild the environment with `hermes pm repair`, validate NumPy under the `hermes` user, and only then restart services. See the full guide's section 7.
+
 ### Quick-start summary
 
 1. **Check CPU flags.** The D525 has `sse4_1` absent: `grep -m1 '^flags' /proc/cpuinfo`.

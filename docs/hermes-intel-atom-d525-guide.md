@@ -192,6 +192,81 @@ Confirm all of the following:
 - NumPy import and numerical tests pass under the Hermes service account.
 - Memory use remains under the configured service limit. Our gateway settled at about 292 MB current memory with a 600 MiB maximum.
 
+## 7. Safe update procedure
+
+Do not use the Dashboard/Desktop Update button or an unattended `hermes update`
+on this installation. Hermes' updater can stash local source changes, and the
+Desktop updater does not automatically restore them. Because the D525
+compatibility fix lives in `pm/packages.py`, an update can leave the NumPy
+hook inactive and make the next dependency repair unsafe.
+
+Use this backup-first workflow instead:
+
+1. Check for updates and review the plan:
+
+   ```bash
+   hermes update --check
+   hermes update --plan
+   ```
+
+2. Back up the current patch and local wheel metadata:
+
+   ```bash
+   mkdir -p /opt/hermes-local-backups
+   cp /usr/local/lib/hermes-agent/pm/packages.py /opt/hermes-local-backups/packages.py.d525
+   sha256sum /opt/hermes-local-wheels/numpy-2.4.3-cp314-cp314-linux_x86_64.whl \
+     > /opt/hermes-local-backups/numpy-wheel.sha256
+   ```
+
+3. Update Hermes from the source checkout you actually run:
+
+   ```bash
+   cd /usr/local/lib/hermes-agent
+   git status --short
+   hermes update --backup --yes --no-gateway-restart
+   ```
+
+4. After the update, verify whether the patch survived:
+
+   ```bash
+   grep -n "_install_atom_compatible_numpy" /usr/local/lib/hermes-agent/pm/packages.py || true
+   ```
+
+   If it is missing, restore the saved patch:
+
+   ```bash
+   cp /opt/hermes-local-backups/packages.py.d525 /usr/local/lib/hermes-agent/pm/packages.py
+   chown hermes:hermes /usr/local/lib/hermes-agent/pm/packages.py
+   ```
+
+5. Validate the wheel hash and rebuild the managed environment as the
+   `hermes` service account:
+
+   ```bash
+   cd /usr/local/lib/hermes-agent
+   sudo -u hermes -s /bin/sh -c "hermes pm repair"
+   ```
+
+6. Verify NumPy under the service account:
+
+   ```bash
+   PY=$(sudo -u hermes -s /bin/sh -c "python -c 'import sys; print(sys.executable)'")
+   sudo -u hermes -s /bin/sh -c "'$PY' -c 'import numpy as np; print(np.__version__, int(np.dot(np.arange(100), np.arange(100))))'"
+   ```
+
+   Expected: `2.4.3 328350`. If this prints `Illegal instruction`, stop and
+   inspect the patch/wheel before restarting services.
+
+7. Point systemd at the new selected environment if the update changed the
+   install path, then restart only Hermes services:
+
+   ```bash
+   systemctl daemon-reload
+   systemctl restart hermes-gateway.service hermes-dashboard.service
+   SYSTEMD_PAGER=cat systemctl show hermes-gateway.service hermes-dashboard.service \
+     -p Id -p ActiveState -p SubState -p MainPID -p ExecStart
+   ```
+
 ## What this fixes—and what it does not
 
 This fixes the NumPy CPU-instruction incompatibility we encountered. It does not guarantee every future native Python dependency will support the D525; if another package crashes with `SIGILL`, inspect that library separately. It also does not provide practical local LLM inference performance. The D525 can host the Hermes agent process, but model calls should use a reachable remote inference service or another machine.

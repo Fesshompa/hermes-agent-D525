@@ -238,6 +238,12 @@ Do not rely on this hook remaining stable across Hermes releases. Inspect
 `pm/packages.py` after each update and adapt the hook if its call site or
 the `environment` interface changes.
 
+After a Hermes update, local source edits can be left unstashed or silently
+dropped by the Desktop updater. Because this compatibility fix lives in
+`pm/packages.py`, always verify the hook is present after updating, then
+rebuild the managed environment with `hermes pm repair` and validate NumPy
+before restarting services.
+
 ### Prepare a checkout
 
 Use an ordinary terminal outside the packaged Hermes app. Leave any existing

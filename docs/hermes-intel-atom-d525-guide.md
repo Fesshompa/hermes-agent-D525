@@ -218,6 +218,16 @@ Use this backup-first workflow instead:
      > /opt/hermes-local-backups/numpy-wheel.sha256
    ```
 
+   **Launcher ownership prerequisite:** the `/usr/local/bin/hermes` launcher must
+   be writable by the `hermes` user, or `hermes update` fails with
+   `could not publish launcher /usr/local/bin/hermes`. If it is root-owned,
+   run once as root:
+
+   ```bash
+   chown hermes:hermes /usr/local/bin/hermes
+   chmod 755 /usr/local/bin/hermes
+   ```
+
 3. Update Hermes from the source checkout you actually run:
 
    ```bash

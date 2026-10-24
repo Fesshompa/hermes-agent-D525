@@ -211,6 +211,33 @@ Activation asks PM to prepare or sync the toolchain for a source checkout, then
 makes it available in the shell. It does not select your editor's Python
 interpreter or redirect an installed desktop app to this checkout.
 
+### Intel Atom D525 compatibility
+
+On some older x86-64 CPUs (for example the Intel Atom D525), the default NumPy
+wheel can crash with `SIGILL` because it uses SSE4.1 instructions the CPU does
+not support. Hermes' package manager includes an internal hook that replaces
+the managed `numpy==2.4.3` wheel with a locally built, compatible wheel after
+dependency sync and before environment validation.
+
+This hook is **not** a supported public plugin API. It is an internal,
+version-specific extension point that can change between releases. To use it:
+
+1. Build a D525-compatible NumPy wheel on the target host with
+   `cpu-baseline=none`, `cpu-dispatch=none`, and `cpu-baseline-detect=disabled`.
+   Install the wheel to `/opt/hermes-local-wheels/` and record its SHA-256.
+2. Ensure the wheel name matches `numpy-2.4.3-cp314-cp314-linux_x86_64.whl`
+   when running CPython 3.14.
+3. In `pm/packages.py`, the `_install_atom_compatible_numpy(environment)`
+   function runs automatically after `lock_and_sync(...)` and before
+   `environment.check(...)` during `Venv.apply()`. It checks CPU flags,
+   validates the wheel hash and Python ABI, reinstalls NumPy from the local
+   wheelhouse, and runs a smoke test. If any check fails, the environment
+   build fails closed.
+
+Do not rely on this hook remaining stable across Hermes releases. Inspect
+`pm/packages.py` after each update and adapt the hook if its call site or
+the `environment` interface changes.
+
 ### Prepare a checkout
 
 Use an ordinary terminal outside the packaged Hermes app. Leave any existing

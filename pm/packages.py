@@ -39,6 +39,93 @@ from pm.update import (
 
 LOG = logging.getLogger(__name__)
 
+
+def _install_atom_compatible_numpy(environment) -> None:
+    """Install and validate the local NumPy build on x86-64 CPUs without SSE4.1."""
+    if sys.platform != "linux" or os.uname().machine not in ("x86_64", "amd64"):
+        return
+
+    try:
+        cpuinfo = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise InstallError("venv", f"Cannot determine CPU features safely: {exc}") from exc
+
+    flags_lines = [
+        line.split(":", 1)[1].split()
+        for line in cpuinfo.splitlines()
+        if line.startswith("flags") and ":" in line
+    ]
+    if not flags_lines:
+        raise InstallError("venv", "Cannot determine CPU features safely: no CPU flags found")
+    if all("sse4_1" in flags for flags in flags_lines):
+        return
+
+    wheelhouse = Path("/opt/hermes-local-wheels")
+    wheel = wheelhouse / "numpy-2.4.3-cp314-cp314-linux_x86_64.whl"
+    expected_sha256 = (
+        "57aa4919e213903947f9bb3d7474566705226117a6ce3b8eeaed8d684b87f907"
+    )
+    if not wheel.is_file():
+        raise InstallError("venv", f"CPU lacks SSE4.1; compatible NumPy wheel is missing: {wheel}")
+
+    version = subprocess.run(
+        [
+            str(environment.executable), "-I", "-c",
+            "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+        ],
+        env=dict(environment.env), capture_output=True, text=True,
+        timeout=30, check=False,
+    )
+    if version.returncode != 0 or version.stdout.strip() != "3.14":
+        raise InstallError(
+            "venv",
+            "CPU lacks SSE4.1, but the local compatible NumPy wheel requires CPython 3.14",
+        )
+
+    import hashlib
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    if digest != expected_sha256:
+        raise InstallError("venv", f"Compatible NumPy wheel SHA-256 mismatch: {wheel}")
+
+    result = environment._run(
+        [
+            "pip", "install",
+            "--no-config",
+            "--python", str(environment.executable),
+            "--no-index",
+            "--only-binary", ":all:",
+            "--find-links", str(wheelhouse.absolute()),
+            "--reinstall",
+            "numpy==2.4.3",
+        ],
+        cwd=wheelhouse,
+        timeout=1800,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout or f"exit status {result.returncode}")[-1200:]
+        raise InstallError("venv", f"Failed to install Atom-compatible NumPy: {detail}")
+
+    smoke_test = """
+import numpy as np
+assert np.__version__ == "2.4.3"
+assert int(np.dot(np.arange(100), np.arange(100))) == 328350
+a = np.arange(16, dtype=np.float64).reshape(4, 4)
+assert np.allclose(a @ a, np.matmul(a, a))
+x = np.linalg.solve(np.array([[3., 1.], [1., 2.]]), np.array([9., 8.]))
+assert np.allclose(x, np.array([2., 3.]))
+"""
+    test = subprocess.run(
+        [str(environment.executable), "-I", "-c", smoke_test],
+        env=dict(environment.env), cwd=wheelhouse,
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    if test.returncode != 0:
+        detail = (test.stderr or test.stdout or f"exit status {test.returncode}")[-1200:]
+        raise InstallError("venv", f"Atom-compatible NumPy smoke test failed: {detail}")
+
+    LOG.info("Installed and validated Atom-compatible NumPy in candidate Hermes environment")
+
+
 _RUST_TRIPLE = {
     "win32-x64": "x86_64-pc-windows-msvc",
     "win32-arm64": "aarch64-pc-windows-msvc",
@@ -480,6 +567,7 @@ class Venv(StatePackage):
                           seed_lock=seed, frozen=repair or not members, replay=replay,
                           source=project, environment=environment)
             resolved_lock = generation / "workspace" / "uv.lock"
+            _install_atom_compatible_numpy(environment)
             environment.check(resolved_lock)
             if repair:
                 from pm.environments import venv_command

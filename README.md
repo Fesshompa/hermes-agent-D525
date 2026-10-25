@@ -48,7 +48,130 @@ These files contain the D525-specific adjustments:
 
 Systemd drop-ins (`hermes-gateway.service` and `hermes-dashboard.service`) are host-local and are not tracked in this repo.
 
-**Important:** do not use the Dashboard/Desktop Update button or unattended `hermes update` on this setup. The updater can stash or drop the `pm/packages.py` patch. After any Hermes update, restore the patch, rebuild the environment with `hermes pm repair`, validate NumPy under the `hermes` user, and only then restart services. See the full guide's section 7.
+## Updating Hermes on Intel Atom D525
+
+**Do not use the Dashboard/Desktop Update button or an unattended `hermes update`.** Hermes' updater can stash or drop the `pm/packages.py` patch, leaving the NumPy compatibility hook inactive and making the next dependency repair unsafe.
+
+Use this backup-first workflow instead:
+
+### Pre-update prerequisites
+
+1. **Launcher ownership**: The `/usr/local/bin/hermes` launcher must be writable by the `hermes` user, or `hermes update` fails with `could not publish launcher /usr/local/bin/hermes`. If it is root-owned, run once as root:
+
+   ```bash
+   chown hermes:hermes /usr/local/bin/hermes
+   chmod 755 /usr/local/bin/hermes
+   ```
+
+2. **Back up the patch and local wheel metadata** (as the `hermes` user or root):
+
+   ```bash
+   mkdir -p /opt/hermes-local-backups
+   cp /usr/local/lib/hermes-agent/pm/packages.py /opt/hermes-local-backups/packages.py.d525
+   sha256sum /opt/hermes-local-wheels/numpy-2.4.3-cp314-cp314-linux_x86_64.whl \
+     > /opt/hermes-local-backups/numpy-wheel.sha256
+   ```
+
+3. **Back up systemd drop-ins** (as root):
+
+   ```bash
+   systemctl cat hermes-gateway.service \
+     > /opt/hermes-local-backups/hermes-gateway.service.txt
+   systemctl cat hermes-dashboard.service \
+     > /opt/hermes-local-backups/hermes-dashboard.service.txt
+   chmod 0600 /opt/hermes-local-backups/*
+   ```
+
+### Update procedure
+
+4. **Check for updates and review the plan** (as the source-install owner):
+
+   ```bash
+   cd /usr/local/lib/hermes-agent
+   hermes update --check
+   hermes update --plan
+   ```
+
+   Confirm the checkout is the intended `Fesshompa/hermes-agent-D525` fork and that the update plan matches the expected installation and services. If `--check` or `--plan` is unsupported, stop and use the installed version's help rather than guessing. Save the Git status, remotes, and commit ID.
+
+5. **Run the update, deferring the gateway restart** (as the source-install owner):
+
+   ```bash
+   hermes update --backup --yes --no-gateway-restart
+   ```
+
+   Read the full output and inspect the update receipt/status afterwards. Deferring the restart does not guarantee that the D525 patch survives.
+
+6. **Verify and, if necessary, port the patch** (as root or the source-install owner):
+
+   ```bash
+   grep -n '_install_atom_compatible_numpy' \
+     /usr/local/lib/hermes-agent/pm/packages.py || true
+   ```
+
+   - If the helper and call site are present and correct, continue to validation.
+   - If either is missing or incompatible, port the D525-specific change from the backup into the **updated** source file.
+   - Do not replace the entire updated `packages.py` with the old backup.
+   - Review the diff and run relevant tests before repairing the environment.
+
+7. **Repair and validate before restarting services** (as the `hermes` service account):
+
+   ```bash
+   cd /usr/local/lib/hermes-agent
+   sudo -u hermes -H /bin/sh -lc 'hermes pm repair'
+   ```
+
+   If this cannot find the correct installation, stop and inspect `command -v hermes`, `hermes --help`, and the source-install environment. Do not accidentally run a second Hermes installation.
+
+   Identify the selected managed Python environment using the PM status or diagnostic commands supported by the installed version. Run the smoke test with that environment's Python, as `hermes`:
+
+   ```bash
+   /path/to/selected/environment/bin/python -c \
+   'import numpy as np; print(np.__version__, int(np.dot(np.arange(100), np.arange(100))))'
+   ```
+
+   Expected output: `2.4.3 328350`. If this prints `Illegal instruction`, stop and inspect the patch/wheel before restarting services.
+
+8. **Restart and verify** (as root, only after patch and environment pass validation):
+
+   1. Confirm the selected environment path.
+   2. Update systemd drop-ins if the selected environment has changed.
+   3. Preserve existing memory limits and other service settings.
+   4. Restart the gateway and dashboard using the appropriate systemd commands.
+   5. Verify both units are active, inspect recent logs, check for repeated restarts or import errors, and rerun the NumPy test against the environment actually used by the services.
+
+   Do not point systemd at a new candidate environment until it has been identified as selected and tested.
+
+### What this fixes—and what it does not
+
+This fixes the NumPy CPU-instruction incompatibility on the Intel Atom D525. It does not guarantee every future native Python dependency will support the D525; if another package crashes with `SIGILL`, inspect that library separately. It also does not provide practical local LLM inference performance. The D525 can host the Hermes agent process, but model calls should use a reachable remote inference service or another machine.
+
+### More durable approach
+
+- Maintain the D525 workaround as a small, reviewed commit in the fork.
+- Rebase or port it as upstream Hermes changes.
+- Add a regression test or release checklist for the hook and call site.
+- Build/repair and test the managed environment before switching live services.
+- Keep the wheel, checksum, patch, and service configuration backed up.
+- Test each Hermes update on a staging clone if practical.
+
+Check which branch and remote the updater uses. Fork installations may follow their own `main` branch, so the fork's branch and remotes determine what an update pulls.
+
+### Quick-start summary (abridged)
+
+1. **Check CPU flags.** The D525 has `sse4_1` absent: `grep -m1 '^flags' /proc/cpuinfo`.
+2. **Build NumPy 2.4.3** with `cpu-baseline=none`, `cpu-dispatch=none`, and `cpu-baseline-detect=disabled` using the same Python version Hermes manages. Install it to `/opt/hermes-local-wheels/` and record its SHA-256.
+3. **Test the wheel** in a throwaway venv before touching Hermes: `import numpy; numpy.__version__` should be `2.4.3` and must not crash with `Illegal instruction`.
+4. **Patch `pm/packages.py`** to reinstall `numpy==2.4.3` from `/opt/hermes-local-wheels/` on Linux x86-64 hosts where `/proc/cpuinfo` lacks `sse4_1`. The hook must fail closed if the wheel is missing, has the wrong hash, or has the wrong Python ABI.
+5. **Repair the Hermes environment** via `hermes pm repair` as the `hermes` service account.
+6. **Verify** with the service account: `python -c "import numpy as np; print(np.__version__, int(np.dot(np.arange(100), np.arange(100))))"` should print `2.4.3 328350`.
+7. **Point systemd** at the selected environment via drop-ins for `hermes-gateway.service` and `hermes-dashboard.service`, setting `ExecStart` to the candidate venv Python and updating `VIRTUAL_ENV`/`PATH`.
+
+See the full guide for detailed commands, ownership pitfalls, and acceptance criteria: `docs/hermes-intel-atom-d525-guide.md`.
+
+---
+
+**Important:** do not use the Dashboard/Desktop Update button or unattended `hermes update` on this setup. The updater can stash or drop the `pm/packages.py` patch. After any Hermes update, restore the patch, rebuild the environment with `hermes pm repair`, validate NumPy under the `hermes` user, and only then restart services.
 
 ### Quick-start summary
 
